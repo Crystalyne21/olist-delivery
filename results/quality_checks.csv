@@ -1,0 +1,15 @@
+﻿check_name,actual,expected,ok
+category_scope,94358,94358,1
+mart_has_rows,96470,1,1
+monthly_delivered,96470,96470,1
+monthly_late_low,3983,3983,1
+one_row_per_order,96470,96470,1
+same_calendar_day_is_on_time,0,0,1
+source_delivered_eligible,96470,96470,1
+state_category_scope,94358,94358,1
+state_scope,96470,96470,1
+summary_late,6534,6534,1
+summary_late_low,3983,3983,1
+summary_low,12272,12272,1
+summary_rated,95824,95824,1
+valid_severity_denominators,0,0,1

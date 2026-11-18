@@ -1,0 +1,13 @@
+﻿metric,value
+answers_before_delivery,4653
+answers_before_purchase,3
+category_multiple,720
+category_single,94358
+category_unknown,1392
+excluded_delivered,8
+late_8_plus_answers_before_delivery,2705
+late_8_plus_answers_before_delivery_after_promised_day,2680
+orders_with_multiple_review_rows,547
+raw_orders,99441
+reviews_missing_in_mart,646
+status_delivered,96478
