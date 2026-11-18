@@ -1,0 +1,5 @@
+olist.sqlite
+olist.sqlite-*
+data/
+__pycache__/
+olist-build-*/
