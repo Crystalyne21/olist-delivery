@@ -1,0 +1,2 @@
+﻿delivered,rated,low,late,late_rated,late_low,rated_after_delivery,low_after_delivery,ontime_rated,ontime_low,delay_rate,late_low_rate,ontime_low_rate,low_rate_gap_pp,raw_orders,first_purchase_date,last_purchase_date,category_orders
+96470,95824,12272,6534,6381,3983,91171,8629,89443,8289,0.06773090079817559,0.6241968343519825,0.09267354628087161,53.15232880711108,99441,2016-09-15,2018-08-29,94358
