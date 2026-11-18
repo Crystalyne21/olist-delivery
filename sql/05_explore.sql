@@ -1,4 +1,5 @@
--- Эти запросы можно выполнять по одному в SQL-редакторе DBeaver.
+-- Запросы для анализа в PostgreSQL.
+SET search_path TO olist_delivery, pg_catalog;
 
 -- Итог по всему наблюдаемому периоду.
 SELECT * FROM v_summary;
@@ -13,16 +14,15 @@ ORDER BY bucket_order;
 
 -- Динамика по месяцу покупки и взвешенная доля опозданий за 3 месяца.
 -- Календарь сохраняет пропуски, чтобы LAG всегда смотрел ровно на месяц назад.
-WITH RECURSIVE calendar(month_start) AS (
-    VALUES ('2017-01-01')
-    UNION ALL
-    SELECT date(month_start, '+1 month')
-    FROM calendar
-    WHERE month_start < '2018-08-01'
+WITH calendar AS (
+    SELECT TO_CHAR(month_start, 'YYYY-MM') AS month
+    FROM GENERATE_SERIES(
+        TIMESTAMP '2017-01-01', TIMESTAMP '2018-08-01', INTERVAL '1 month'
+    ) AS months(month_start)
 ),
 monthly_counts AS (
     SELECT
-        strftime('%Y-%m', calendar.month_start) AS month,
+        calendar.month,
         COALESCE(v_monthly.delivered, 0) AS delivered,
         COALESCE(v_monthly.late, 0) AS late,
         COALESCE(v_monthly.rated, 0) AS rated,
@@ -30,7 +30,7 @@ monthly_counts AS (
         v_monthly.delay_rate,
         v_monthly.low_rate
     FROM calendar
-    LEFT JOIN v_monthly ON v_monthly.month = strftime('%Y-%m', calendar.month_start)
+    LEFT JOIN v_monthly USING (month)
 ),
 monthly_windows AS (
     SELECT
@@ -124,7 +124,7 @@ ranked_segments AS (
         ROW_NUMBER() OVER (ORDER BY late_rated DESC, delivered DESC, state, category)
             AS position,
         COUNT(*) OVER () AS segments_compared,
-        COUNT(CASE WHEN low_rate_gap > 0 THEN 1 END) OVER () AS segments_with_higher_low_rate,
+        COUNT(*) FILTER (WHERE low_rate_gap > 0) OVER () AS segments_with_higher_low_rate,
         SUM(late_rated) OVER () AS late_rated_in_comparison
     FROM comparable_segments
 )

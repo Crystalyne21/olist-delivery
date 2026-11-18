@@ -24,8 +24,8 @@ SELECT
     SUM(late_low) AS late_low,
     SUM(rated_after_delivery) AS rated_after_delivery,
     SUM(low_after_delivery) AS low_after_delivery,
-    1.0 * SUM(low) / NULLIF(SUM(rated), 0) AS low_rate,
-    1.0 * SUM(low_after_delivery) / NULLIF(SUM(rated_after_delivery), 0) AS low_after_delivery_rate
+    SUM(low)::numeric / NULLIF(SUM(rated), 0) AS low_rate,
+    SUM(low_after_delivery)::numeric / NULLIF(SUM(rated_after_delivery), 0) AS low_after_delivery_rate
 FROM v_severity_by_state
 GROUP BY bucket, bucket_order;
 
@@ -54,9 +54,9 @@ rates AS (
         totals.*,
         rated - late_rated AS ontime_rated,
         low - late_low AS ontime_low,
-        1.0 * late / NULLIF(delivered, 0) AS delay_rate,
-        1.0 * late_low / NULLIF(late_rated, 0) AS late_low_rate,
-        1.0 * (low - late_low) / NULLIF(rated - late_rated, 0) AS ontime_low_rate
+        late::numeric / NULLIF(delivered, 0) AS delay_rate,
+        late_low::numeric / NULLIF(late_rated, 0) AS late_low_rate,
+        (low - late_low)::numeric / NULLIF(rated - late_rated, 0) AS ontime_low_rate
     FROM totals
 )
 SELECT
@@ -88,33 +88,31 @@ SELECT
     SUM(late) AS late,
     SUM(late_rated) AS late_rated,
     SUM(late_low) AS late_low,
-    1.0 * SUM(late) / NULLIF(SUM(delivered), 0) AS delay_rate,
-    1.0 * SUM(low) / NULLIF(SUM(rated), 0) AS low_rate
+    SUM(late)::numeric / NULLIF(SUM(delivered), 0) AS delay_rate,
+    SUM(low)::numeric / NULLIF(SUM(rated), 0) AS low_rate
 FROM v_monthly_by_state
 GROUP BY month;
 
 CREATE VIEW v_segments AS
-WITH segment_keys AS (
-    SELECT order_id, 'state' AS segment_type, state, NULL AS category FROM order_mart
-    UNION ALL
-    SELECT order_id, 'category', NULL, category FROM order_mart WHERE category_code IS NOT NULL
-    UNION ALL
-    SELECT order_id, 'state_category', state, category FROM order_mart WHERE category_code IS NOT NULL
-),
-counts AS (
+WITH counts AS (
     SELECT
-        segment_type,
-        segment_keys.state,
-        segment_keys.category,
+        CASE
+            WHEN GROUPING(category) = 1 THEN 'state'
+            WHEN GROUPING(state) = 1 THEN 'category'
+            ELSE 'state_category'
+        END AS segment_type,
+        state,
+        category,
         COUNT(*) AS delivered,
         SUM(is_rated) AS rated,
         SUM(is_low) AS low,
         SUM(is_late) AS late,
         SUM(is_late * is_rated) AS late_rated,
         SUM(is_late * is_low) AS late_low
-    FROM segment_keys
-    JOIN v_order_flags USING (order_id)
-    GROUP BY segment_type, segment_keys.state, segment_keys.category
+    FROM v_order_flags
+    GROUP BY GROUPING SETS ((state), (category), (state, category))
+    -- Заказы без известной категории входят только в срез по штату.
+    HAVING GROUPING(category) = 1 OR category IS NOT NULL
 )
 SELECT
     segment_type,
@@ -131,9 +129,9 @@ SELECT
     counts.late,
     counts.late_rated,
     counts.late_low,
-    1.0 * late / NULLIF(delivered, 0) AS delay_rate,
-    1.0 * late_low / NULLIF(late_rated, 0) AS late_low_rate,
-    1.0 * (low - late_low) / NULLIF(rated - late_rated, 0) AS ontime_low_rate
+    late::numeric / NULLIF(delivered, 0) AS delay_rate,
+    late_low::numeric / NULLIF(late_rated, 0) AS late_low_rate,
+    (low - late_low)::numeric / NULLIF(rated - late_rated, 0) AS ontime_low_rate
 FROM counts;
 
 -- Порог применяется внутри каждого типа среза. Один заказ может входить в разные типы.
