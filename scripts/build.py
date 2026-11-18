@@ -1,10 +1,11 @@
-"""Загрузка CSV в SQLite и выгрузка результатов SQL."""
+"""Загрузка CSV в PostgreSQL через psql и выгрузка результатов SQL."""
 
 import argparse
 import csv
 import json
 from pathlib import Path
-import sqlite3
+import shutil
+import subprocess
 from tempfile import TemporaryDirectory
 
 
@@ -64,37 +65,74 @@ DASHBOARD_QUERIES = {
 }
 
 
-def load_sources(connection, source_dir):
+def prepare_sources(source_dir, stage):
     for table, (filename, columns) in SOURCES.items():
-        with (source_dir / filename).open(encoding="utf-8-sig", newline="") as source:
+        with (
+            (source_dir / filename).open(encoding="utf-8-sig", newline="") as source,
+            (stage / f"{table}.csv").open("w", encoding="utf-8", newline="") as target,
+        ):
             reader = csv.DictReader(source)
             missing = set(columns).difference(reader.fieldnames or ())
             if missing:
                 raise ValueError(f"{filename}: missing columns {', '.join(sorted(missing))}")
-            placeholders = ", ".join("?" for _ in columns)
-            rows = (tuple(row[column] or None for column in columns) for row in reader)
-            connection.executemany(f"INSERT INTO {table} VALUES ({placeholders})", rows)
-
-
-def write_results(connection, stage):
-    for name, query in EXPORTS.items():
-        cursor = connection.execute(query)
-        with (stage / f"{name}.csv").open("w", encoding="utf-8-sig", newline="") as target:
             writer = csv.writer(target)
-            writer.writerow([column[0] for column in cursor.description])
-            writer.writerows(cursor)
+            writer.writerows(tuple(row[column] for column in columns) for row in reader)
 
-    data = {}
-    for name, query in DASHBOARD_QUERIES.items():
-        data[name] = [dict(row) for row in connection.execute(query)]
-    data["summary"] = data["summary"][0]
+
+def run_sql(psql, connection_options, stage):
+    sql_files = PROJECT / "sql"
+    program = [
+        r"\encoding UTF8",
+        "SET client_min_messages TO warning;",
+        "SET DateStyle TO 'ISO, YMD';",
+        (sql_files / "01_source.sql").read_text(encoding="utf-8"),
+    ]
+    for table in SOURCES:
+        program.append(rf"\copy {table} FROM '{table}.csv' WITH (FORMAT csv, ENCODING 'UTF8')")
+    program.append("ANALYZE " + ", ".join(SOURCES) + ";")
+    for filename in ("02_order_mart.sql", "03_analysis.sql", "04_quality_checks.sql"):
+        program.append((sql_files / filename).read_text(encoding="utf-8"))
+
+    for name, query in (EXPORTS | DASHBOARD_QUERIES).items():
+        program.extend([
+            rf"\o {name}.json",
+            f"SELECT COALESCE(json_agg(result), '[]'::json) FROM ({query}) AS result;",
+            r"\o",
+        ])
+
+    (stage / "build.sql").write_text("\n".join(program) + "\n", encoding="utf-8")
+    command = [
+        psql, "-X", "--quiet", "--no-align", "--tuples-only", "--single-transaction",
+        "--set=ON_ERROR_STOP=1", *connection_options, "--file=build.sql",
+    ]
+    try:
+        subprocess.run(command, cwd=stage, check=True)
+    except subprocess.CalledProcessError as error:
+        raise SystemExit(f"PostgreSQL: psql завершился с кодом {error.returncode}.") from None
+
+
+def write_results(stage):
+    data = {
+        name: json.loads((stage / f"{name}.json").read_text(encoding="utf-8"))
+        for name in EXPORTS | DASHBOARD_QUERIES
+    }
+    for name in EXPORTS:
+        rows = data[name]
+        with (stage / f"{name}.csv").open("w", encoding="utf-8-sig", newline="") as target:
+            if rows:
+                writer = csv.DictWriter(target, fieldnames=list(rows[0]))
+                writer.writeheader()
+                writer.writerows(rows)
+
+    snapshot = {name: data[name] for name in DASHBOARD_QUERIES}
+    snapshot["summary"] = snapshot["summary"][0]
     (stage / "dashboard-data.json").write_text(
-        json.dumps(data, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
+        json.dumps(snapshot, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
         encoding="utf-8",
     )
 
 
-def build(source_dir):
+def build(source_dir, psql, connection_options):
     missing = [filename for filename, _ in SOURCES.values() if not (source_dir / filename).is_file()]
     if missing:
         raise FileNotFoundError(f"{source_dir}: missing CSV files: {', '.join(missing)}")
@@ -106,32 +144,14 @@ def build(source_dir):
 
     with TemporaryDirectory(prefix="olist-build-", dir=PROJECT) as temp_dir:
         stage = Path(temp_dir)
-        database = stage / "olist.sqlite"
-        connection = sqlite3.connect(database)
-        connection.row_factory = sqlite3.Row
-        try:
-            connection.executescript((PROJECT / "sql/01_source.sql").read_text(encoding="utf-8"))
-            with connection:
-                load_sources(connection, source_dir)
-
-            for filename in ("02_order_mart.sql", "03_analysis.sql", "04_quality_checks.sql"):
-                connection.executescript((PROJECT / "sql" / filename).read_text(encoding="utf-8"))
-
-            failures = list(connection.execute("SELECT * FROM v_checks WHERE ok IS NOT 1"))
-            if failures:
-                details = [f"{r['check_name']}: {r['actual']} (expected {r['expected']})" for r in failures]
-                raise RuntimeError("SQL checks failed: " + "; ".join(details))
-
-            write_results(connection, stage)
-        finally:
-            connection.close()
-
-        database.replace(PROJECT / "olist.sqlite")
+        prepare_sources(source_dir, stage)
+        run_sql(psql, connection_options, stage)
+        write_results(stage)
         for name in EXPORTS:
             (stage / f"{name}.csv").replace(results / f"{name}.csv")
         (stage / "dashboard-data.json").replace(dashboard / "dashboard-data.json")
 
-    print(f"SQLite database: {PROJECT / 'olist.sqlite'}")
+    print("PostgreSQL schema: olist_delivery")
     print(f"SQL exports: {results}")
     print("All SQL data checks passed.")
 
@@ -139,8 +159,23 @@ def build(source_dir):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-dir", required=True, type=Path, help="Directory with the Olist CSV files")
+    parser.add_argument("--dbname", required=True, help="Existing PostgreSQL database")
+    parser.add_argument("--host", help="PostgreSQL host (default: libpq settings)")
+    parser.add_argument("--port", help="PostgreSQL port (default: libpq settings)")
+    parser.add_argument("--user", help="PostgreSQL role (default: libpq settings)")
+    parser.add_argument("--psql", default="psql", help="Path to psql if it is outside PATH")
     args = parser.parse_args()
-    build(args.data_dir)
+
+    psql = shutil.which(args.psql)
+    if psql is None:
+        parser.error("psql не найден. Укажите путь к нему через --psql.")
+    connection_options = [f"--dbname={args.dbname}"]
+    for option in ("host", "port", "user"):
+        value = getattr(args, option)
+        if value is not None:
+            flag = "username" if option == "user" else option
+            connection_options.append(f"--{flag}={value}")
+    build(args.data_dir, str(Path(psql).resolve()), connection_options)
 
 
 if __name__ == "__main__":
